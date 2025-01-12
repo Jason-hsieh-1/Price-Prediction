@@ -1,17 +1,10 @@
 ---
-title: "Regression Challenge in R group 7 - Airbnb"
+title: "Regression Challenge in R - Airbnb"
 output: 
   pdf_document: default
   html_document: paged
 date: "`r Sys.Date()`"
 ---
-Group 7
-Group Member:
-Jessia Khalis Tanujaya (7405109)
-Julia Heck (7349727)
-Lina Kapohl (5896738)
-Ming Hsi Hsieh (7374051)
-Xintong Li (7366714)
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
