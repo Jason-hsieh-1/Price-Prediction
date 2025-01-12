@@ -1,0 +1,1115 @@
+---
+title: "Regression Challenge in R group 7 - Airbnb"
+output: 
+  pdf_document: default
+  html_document: paged
+date: "`r Sys.Date()`"
+---
+Group 7
+Group Member:
+Jessia Khalis Tanujaya (7405109)
+Julia Heck (7349727)
+Lina Kapohl (5896738)
+Ming Hsi Hsieh (7374051)
+Xintong Li (7366714)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Introduction
+In this challenge, we aim at predicting the price based on certain variables for the houses on Airbnb platform in Chicago. Airbnb is one of the largest temporary rental house platforms in the world, and they operate in over 220 countries. Now, we have the data from Airbnb regarding the basic information of the house owners in Chicago area. Airbnb is interested in the price prediction to have a better planning of their strategy in Chicago by understanding the effect of each variable (predictor) on the price. Therefore, in this challenge, we are going to use selected regression models such as ridge, lasso, random forest and so on to help Airbnb predict the price and discover and understand certain variables that affect the price. 
+
+# 2. Dataset
+In this part, we firstly prepare and clean the train data set to have reasonable and solid data that we explore to see the distribution, what we can do, and later on run the regression models. Furthermore, we run chosen statistics models to decide which variables we want to use in the first place.
+
+## 2.1. Exploratory Data Analytics
+
+### 2.1.1. Prepare workspace
+Set up work space by removing all existing data from working memory, initializing the random number generator, turning of scientific notation of large numbers.
+```{r, echo=FALSE}
+rm(list=ls())
+set.seed(1234)
+options(scipen=10000)
+select <- dplyr::select
+```
+
+Here we load some libraries. They contain functions that we can use later on.
+```{r, message=FALSE}
+library(tidymodels)
+library(ISLR)
+library(GGally)
+library(broom)
+library(dotwhisker)
+library(performance)
+library(funModeling)
+library(sjPlot)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(funModeling)
+library(vip)
+library(forcats)
+library(sf) 
+library(plotly)
+library(tidyr)
+library(corrplot)
+library(ggcorrplot)
+library(ggridges)
+library(xgboost)
+library(glmnet)
+```
+
+### 2.1.2 Import data
+We load the data into a dataframe called train and transform neighbourhood and room_type as factor.
+```{r}
+train <- read.csv("train.csv") %>%
+  mutate(neighbourhood = as.factor(neighbourhood),
+         room_type = as.factor(room_type))
+# View(train)
+str(train)
+```
+
+The detailed exploration of the data can be found in section 2.3 to 2.5.
+
+## 2.2. Data wrangling
+
+### 2.2.1. Prepare the data and get a overview of new cleaned dataset
+we first clean the data by removing NA.
+```{r}
+anyNA(train)
+train <- train %>%
+  mutate(reviews_per_month = ifelse(is.na(reviews_per_month), 0L, reviews_per_month))
+anyNA(train)
+```
+
+We also think that because there is no value in some rows in last_review date, it makes no sense to give it a new value. Giving a new value may affect the result because we don't know the exact date when there will be a review to that accommodation place. Besides, those with blanks in last_reviews columns also have 0 number of reviews but they may be new houses, so training these data can still be valuable. Therefore, we decide to deselect the column "last_review" so that the number of reviews that is equal to 0 can still be evaluated in the model.
+```{r}
+train_new <- train %>%
+  select(-last_review)
+```
+
+### 2.2.2.  Summary of new cleaned dataset
+The distribution of all numeric variables and the correlation overview are plotted here.
+```{r}
+# View(train_new)
+summary(train_new)
+train_new %>%
+  # we want to see the distributions of all variables
+  select(-ID, -name, -host_id, -host_name) %>%
+  plot_num()
+ggpairs(train_new %>%
+          # to use ggpairs, we need to filter out non-numeric value, and here we also filter out some other variables to have a more clear view
+          select(-ID, -name, -host_id, -host_name, -neighbourhood, -latitude, -longitude, -room_type))
+```
+
+## 2.3. Distribution
+
+### 2.3.1. Price distribution
+There is a normal distribution in the data after we do the log for price in the previous code.
+```{r}
+train_new %>%
+  ggplot() +
+  aes(x=price) +
+  geom_histogram() +
+  scale_x_log10() +
+  labs(title = "Distribution of Price after log")
+```
+
+### 2.3.2 Log the price
+```{r}
+train_new <- train_new %>%
+  mutate(price = log(price))
+```
+
+### 2.3.3. Create relation map between location and price
+Here, we want to know if the location (latitude abnd longitude) is related to the price. We use log(price) because it's easier to observe the trend as the previous plot showed for the distribution of price.
+```{r}
+capture.output({
+chicago <- st_read(dsn = "./chicago", layer = "geo_export_36a240a2-354e-42ad-8e86-a38f0515bf66")}, file = NULL)
+
+adjust_train_chi <- train_new %>%
+  mutate(community = toupper(neighbourhood))
+
+chicago_cbn <- chicago %>%
+  left_join(adjust_train_chi, by="community")
+
+ggplot(data = chicago_cbn) +
+  geom_sf(aes(fill = price), color = "white") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(title = "Price Distribution in Chicago", subtitle = "with log(price)")
+```
+
+::: {.column width="20%"}
+![](img/IMG_2968.jpg)
+:::
+When we compare the high price region from the plot with the real map in Chicago, we observe that there is a relation between price and the main traffic region.
+
+We can also see here that the higher price is usually concentrated in certain area.
+```{r}
+min_longitude <- min(train_new$longitude)
+max_longitude <- max(train_new$longitude)
+min_latitude <- min(train_new$latitude)
+max_latitude <- max(train_new$latitude)
+center_longitude <- median(train_new$longitude)
+center_latitude <- median(train_new$latitude)
+train_new %>%
+  ggplot() +
+  aes(x=longitude, y=latitude, size=price, color=room_type) +
+  geom_point(alpha=0.5) +
+  xlim(c(min_longitude, max_longitude)) +
+  ylim(c(min_latitude, max_latitude)) +
+  labs(title = "Price Distribution based on Coordinates")
+```
+
+### 2.3.4. Boxplot for price and room type
+Here we see the relation between room_type and price:
+When the room type is more luxurious such as entire home and hotel room, the price is usually higher.
+```{r}
+train_new %>%
+  ggplot() +
+  aes(x=room_type, y=price) +
+  geom_boxplot() +
+  scale_y_log10() +
+  labs(title = "Relation between Price and Room Type")
+```
+
+### 2.3.5. Price distribution based on room type
+The hotel price range is larger and we also notice that in this plot, the price is generally higher for entire home or apartment and lower for shared room.
+```{r}
+train_new %>%
+  ggplot() +
+  aes(x = price, y = room_type) +
+  geom_density_ridges(scale = 4) + 
+  scale_y_discrete(expand = c(0, 0)) +     # will generally have to set the `expand` option
+  scale_x_continuous(expand = c(0, 0)) +   # for both axes to remove unneeded padding
+  coord_cartesian(clip = "off") + # to avoid clipping of the very top of the top ridgeline
+  theme_ridges() +
+  scale_x_log10() +
+  labs(title = "Price Distribution per Room Type")
+```
+
+### 2.3.6. Relation between price and number of reviews
+We are also interested in the relation between price and number of reviews, but it seems there is no strong relation.
+```{r}
+train_new %>%
+  ggplot() +
+  aes(x=number_of_reviews, y=price) +
+  geom_point() +
+  scale_y_log10() +
+  labs(title = "Relation between Price and Num. of Reviews")
+```
+
+## 2.4. Statistics
+
+### 2.4.1. Correlation between numeric variables
+We create a correlation heatmap to see the overall effect of all numeric variables, and we notice that other numeric variables are to some degree correlated with price.
+```{r}
+adjust_train_num <- train_new %>%
+  select(price, latitude, longitude, minimum_nights, number_of_reviews, reviews_per_month, calculated_host_listings_count, availability_365)
+correlation_matrix <- cor(adjust_train_num, method = "pearson")
+corrplot(correlation_matrix, method = "color")
+```
+
+### 2.4.2. P-value test to check sifnificance
+We also want to see if the relation between price and other variables are significant
+```{r}
+p_value_matrix <- matrix(NA, nrow = ncol(correlation_matrix), ncol = nrow(correlation_matrix))
+for (i in 1:ncol(correlation_matrix)) {
+  for (j in 1:nrow(correlation_matrix)) {
+    if (i != j) {
+      p_value_matrix[i, j] <- cor.test(adjust_train_num[, i], adjust_train_num[, j])$p.value
+    }
+  }
+}
+p_value_matrix
+significance_threshold <- 0.05
+p_value_df <- as.data.frame(p_value_matrix)
+colnames(p_value_df) <- colnames(correlation_matrix)
+rownames(p_value_df) <- colnames(correlation_matrix)
+p_value_df$row <- rownames(p_value_df)
+p_value_df_long <- tidyr::gather(p_value_df, key = variable, value = p_value, -row)
+ggplot(p_value_df_long, aes(x = variable, y = row, fill = p_value < significance_threshold)) +
+  geom_tile(alpha=0.6) +
+  scale_fill_manual(values = c("white", "red")) +
+  labs(title = "P-Value Heatmap") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank(),
+        axis.title = element_blank()) + 
+  guides(fill=guide_legend(title="Significance"))
+```
+
+### 2.4.3. Combine corelation and significance heatmap
+If we combine the 2 plots, then we will get the next plot. The correlation between price and other variables are mostly significant. Only minimum night has no significance.
+```{r}
+p.mat <- round(cor_pmat(adjust_train_num), 2)
+p.mat
+corr <- round(cor(adjust_train_num), 1)
+ggcorrplot(corr, p.mat = p.mat, colors = c("#6d9ec1", "white", "#e46726"), legend.title = "Correlation", title = "Correlation between the variables") +
+  theme(panel.grid = element_blank()
+  ) +
+  labs(title = "Correlation of Different Variables", subtitle = "X = not significant", x = "Variable X", y = "Variable Y") + 
+  theme (plot.title = element_text (size = 18, face = "bold", hjust = 0.5),
+         axis.line = element_blank()) 
+```
+
+### 2.4.4. Regression
+First we will try a regression with all variables that could be relevant.
+```{r}
+regression_J <- lm( price ~ latitude + longitude + room_type + reviews_per_month + calculated_host_listings_count + minimum_nights + number_of_reviews + availability_365, data = train_new)
+summary(regression_J)
+#excluding insignificant variables
+regression2_J <- lm( price ~ latitude + longitude + room_type + reviews_per_month + calculated_host_listings_count, data = train_new)
+summary(regression2_J)
+```
+We will be excluding number of reviews, minimum nights and availability because it does not have a significant effect on price and after excluding it the R^2 got higher.
+
+We will use room type and calculated_host_listings_count as an interaction because it is significant in a later model we will also add latitude and room_type as well as longitude and room_type.
+
+```{r}
+regression3_J <-lm(price ~ latitude + longitude + room_type + reviews_per_month + calculated_host_listings_count + room_type:calculated_host_listings_count, data = train_new)
+summary(regression3_J)
+```
+
+## 2.5. First Variable choices
+Based on the gathered knowledge from the analysis we choose the following variables: latitude + longitude + room_type (as dummy) + Neighbourhood (as dummy) + number_of_reviews + reviews_per_month + calculated_host_listings_count + availability_365.
+
+# 3. Method
+In this part, we are going to run chosen models to predict the price for Airbnb. And during the process, we also gradually adjust the predictors we are using based on the impact on price and importance level. Finally, we compared different combination of predictors by random forest plus tuning because in general it can produce the best prediction with lowest RMSE in test data. One more thing we do here is ensemble learning by weighted average method to have even better and robust model to predict the price.
+
+## 3.1. Read and check the test data
+For test data set, we match the columns with train data set in order to combine the two in 3.2 section. In addition, we test if test data set has any NA value which may cause problems when we make predictions.
+```{r}
+test <- read.csv("test.csv") %>%
+  select(-name, -host_id, -host_name, -last_review) %>%
+  mutate(reviews_per_month = ifelse(is.na(reviews_per_month), 0L, reviews_per_month),
+         neighbourhood = as.factor(neighbourhood),
+         room_type = as.factor(room_type))
+#View(test)
+anyNA(test)
+```
+
+## 3.2. Combine data and create dummy variables for neighbourhood and room type
+We notice that there are some values in neighborhood only either in train or in test data, so here we combine the 2 data sets and create dummy variables together, and then separate them again into train and test data.
+```{r}
+# create dummy variables for neighourhood
+adjust_train_cb <- train_new %>%
+  # select same columns in train and test data
+  select(-name, -host_id, -host_name)
+str(adjust_train_cb)
+test_cb <- test
+test_cb$price <- 0 # Create price column so that train and test have same columns
+str(test_cb)
+full_df <- adjust_train_cb %>%
+  # combine train and test data
+  rbind(test_cb)
+
+full_df <- full_df %>%
+  mutate(neighbourhood = gsub(" ", "", neighbourhood), 
+         room_type = gsub(" ", "", room_type)) # Romove the space in the value for better column names of dummy variables
+
+# Create dummies
+dummy_variables_neighbour <- model.matrix(~ neighbourhood - 1, data = full_df) 
+dummy_variables_roomtype <- model.matrix(~ room_type - 1, data = full_df)
+
+# Combine outcome variable with dummy variables
+combined_data <- cbind(full_df, dummy_variables_neighbour, dummy_variables_roomtype) 
+
+# Separate dataset
+# New train dataset
+train_new2 <- combined_data %>%
+  # train data is from price != 0, and we deselect data that we don't use anymore
+  filter(price != 0) %>%
+  select(-ID, -neighbourhood, -room_type)
+
+# New test dataset
+test_new2 <- combined_data %>%
+  # test data is from price == 0
+  filter(price == 0) %>%
+  # Original test dataset does not have price so we deselect it here
+  select(-price, -neighbourhood, -room_type)
+```
+
+## 3.3. Model training
+We first check the effect of all variables we have selected on price to train the models including ridge, lasso, regression tree, bagging, random forest, boosting, and so on. Most of which are trained by tuning. 
+
+Here after some trial and error and the observations of importance level and the impact of each variable, we decide to choose certain predictors to run the model. In this part, we demonstrate the whole process of choosing the predictors because we have many dummy variables.
+
+### 3.3.1. Ridge regression + tuning
+After running the model on test data set, we get the result of 253.16 on Kaggle, which is the RMSE of test data set.
+```{r}
+# process data by creating recipe
+ridge_recipe <- 
+  recipe(formula = price ~ ., data = train_new2) %>% 
+  # assigns a previously unseen factor level to a new value
+  step_novel(all_nominal_predictors()) %>%     
+  step_dummy(all_nominal_predictors()) %>% 
+  # removes variables that contain only a single value
+  step_zv(all_predictors()) %>%                
+  step_normalize(all_predictors())
+
+# specify model
+ridge_spec <- linear_reg(mixture = 0, penalty = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("glmnet")
+
+# Create workflow
+ridge_wf <- workflow() %>% 
+  add_recipe(ridge_recipe) %>% 
+  add_model(ridge_spec)
+
+# Do cross validation
+train_fold_ridge <- vfold_cv(train_new2, v = 10)
+
+# Define values to be explored
+penalty_grid_ridge <- grid_regular(
+  penalty(range = c(-5,5)), # Note that this *range is log-scaled*.
+  levels = 50) # range: smallest and largest values possible
+
+# Tune model
+tune_res_ridge <- tune_grid(
+  object = ridge_wf,   # Workflow object
+  resamples = train_fold_ridge,  # CV resamples
+  grid = penalty_grid_ridge)     # Possible values we want to explore
+
+# Fit data to model
+best_penalty <- tune_res_ridge %>%
+  select_best(metric = "rmse")
+ridge_final_wf <- ridge_wf %>%
+  finalize_workflow(best_penalty)
+ridge_final_fit <- ridge_final_wf %>%
+  fit(train_new2)
+
+# 8. Make predictions
+predictions_ridge <- ridge_final_fit %>%
+  predict(new_data = test_new2)
+submission_ridge <- cbind(
+  test_new2 %>%
+    select(ID),
+  exp(predictions_ridge)
+)
+names(submission_ridge)[names(submission_ridge) == ".pred"] <- "price"
+
+# make sure the prediction does not include NA
+anyNA(submission_ridge)
+
+# Create csv file to upload
+# View(submission_ridge)
+write.csv(submission_ridge, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_ridge.csv", row.names=FALSE)
+```
+
+### 3.3.2. Lasso regression
+After running the model, we obtain the result of 253.13 on Kaggle, but we observe many dummy variables from neighbourhood have no effect on price. Therefore, we deselect those neighbourhood with estimate value equal to 0 from the predictors we use, as well as number_of_reviews.
+```{r}
+# Preprocess data (Recipe)
+ridge_recipe_lasso <- 
+  recipe(formula = price ~ ., data = train_new2) %>% 
+  # assigns a previously unseen factor level to a new value
+  step_novel(all_nominal_predictors()) %>%     
+  step_dummy(all_nominal_predictors()) %>% 
+  # removes variables that contain only a single value
+  step_zv(all_predictors()) %>%                
+  step_normalize(all_predictors())
+
+# Specify model (setting mixture = 1 for Lasso)
+lasso_spec <- 
+  linear_reg(mixture = 1, penalty = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet")
+
+# Create workflow
+lasso_wf <- workflow() %>% 
+  add_recipe(ridge_recipe_lasso) %>% 
+  add_model(lasso_spec)
+
+# Do cross validation
+train_fold_lasso <- vfold_cv(train_new2, v = 10)
+
+# Define values to be explored
+penalty_grid <- grid_regular(
+  penalty(range = c(-5,5)), # Note that this *range is log-scaled*.
+  levels = 50) # range: smallest and largest values possible
+
+# Tune model
+tune_res <- tune_grid(
+  object = lasso_wf,   # Workflow object
+  resamples = train_fold_lasso,  # CV resamples
+  grid = penalty_grid)     # Possible values we want to explore
+
+# Fit data to model
+best_penalty <- tune_res %>% select_best(metric = "rmse")
+lasso_final_wf <- lasso_wf %>% finalize_workflow(best_penalty)
+lasso_final_fit <- lasso_final_wf %>% fit(train_new2)
+
+# Make predictions
+predictions_lasso <- lasso_final_fit %>%
+  predict(new_data = test_new2)
+submission_lasso <- cbind(
+  test_new2 %>%
+    select(ID),
+  exp(predictions_lasso)
+)
+
+# To see which variables lasso drops because that means the effect is equal to 0, and thus we will later remove it from predictors and we take only 20 most effective predictors to do the predictions
+lasso_estimate <- tidy(lasso_final_fit)
+lasso_notzero <- lasso_estimate %>%
+  filter(estimate != 0) %>%
+  arrange(desc(abs(estimate))) %>%
+  head(n = 20)
+# View(lasso_notzero)
+
+# Change the column name of .pred
+names(submission_lasso)[names(submission_lasso) == ".pred"] <- "price"
+
+# make sure the prediction does not include NA
+anyNA(submission_lasso)
+
+# Create csv file to upload
+# View(submission_lasso)
+write.csv(submission_lasso, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_lasso.csv", row.names=FALSE)
+
+```
+
+Here we also see that most of neighbourhood dummies and number_of_reviews has no importance and some types of room as well. Therefore, we will later filter out the number_of_reviews and those neighbourhood and room types with lower importance as well as no estimate value to run the following model.
+```{r}
+# Lasso: check the importance level of each variables
+lasso_final_fit %>%
+  # Calculate var importance
+  fit(train_new2) %>%
+  extract_fit_parsnip() %>%
+  vip::vi(lambda = best_penalty$penalty) %>%
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) %>%
+  # Plot
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+  
+```
+
+### 3.3.3. Adjust the train data set
+We pick those that have higher importance value (importance > 0.05, only for neighbourhood and room type; for other variables we have in original data set, we keep all except number_of_reviews because it has no effect on price and the importance level is equal to 0.) as our new predictors for train data set, and also adjust the test data set to the same structure.
+```{r}
+# Remove neighbourhood and room type with importance < 0.05 as one of the predictors
+train_new3 <- train_new2 %>%
+  select(price, latitude, longitude, reviews_per_month, availability_365, calculated_host_listings_count, minimum_nights, neighbourhoodSouthShore, neighbourhoodLoop, neighbourhoodWestTown, neighbourhoodNearNorthSide, `room_typeEntirehome/apt`, room_typePrivateroom, room_typeSharedroom)
+
+test_new3 <- test_new2 %>%
+  select(ID, latitude, longitude, reviews_per_month, availability_365, calculated_host_listings_count, minimum_nights, neighbourhoodSouthShore, neighbourhoodLoop, neighbourhoodWestTown, neighbourhoodNearNorthSide, `room_typeEntirehome/apt`, room_typePrivateroom, room_typeSharedroom)
+```
+
+## 3.4. Run all models again
+After adjusting the data set, we then train all the models to observe the effect of new variables selected on price.
+
+### 3.4.1. polynomial regression
+We will skip the linear regression model for our prediction, since the linear regression model always assume a linear relationship between the predictors and the response variable. But in our case, the predictors latitude and longitude don't have linear relationships with price (see plot above), so these relationships that cannot be captured by the linear regression model. So, instead, we will try the polynomial regression model. The score is 253.16.
+```{r}
+# Preprocess data (Recipe)
+poly_tuned_rec <- recipe( price ~ ., data = train_new3 ) %>%
+  step_poly( ., degree = tune() )
+
+# Specify model
+lm_spec <- linear_reg() %>%     # linear regression
+  set_mode( "regression" ) %>%  # regression (or classification)
+  set_engine( "lm" )            # method of estimation
+
+# Create workflow
+poly_tuned_wf <- workflow() %>%
+  add_model( lm_spec ) %>%
+  add_recipe( poly_tuned_rec )
+
+# Do cross validation
+player_folds <- vfold_cv(train_new3, v = 10)
+
+# Define values to be explored
+degree_grid <- grid_regular( degree( range = c( 1, 10 )), levels = 10 )
+
+# Tune model
+tune_res <- tune_grid(
+  object = poly_tuned_wf,   # Workflow object
+  resamples = player_folds, # CV resamples
+  grid = degree_grid  )     # Possible values we want to explore
+
+# Fit data to model
+best_degree <- tune_res %>% select_by_one_std_err( degree, metric = "rmse" )
+poly_final_wf <- poly_tuned_wf %>% finalize_workflow( best_degree )
+poly_final_fit <- poly_final_wf %>% fit( train_new3 )
+
+# Make predictions
+predictions_poly <- poly_final_fit %>%
+  predict(new_data = test_new3)
+submission_poly <- cbind(
+  test_new3 %>%
+    select(ID),
+  exp(predictions_poly)
+)
+names(submission_poly)[names(submission_poly) == ".pred"] <- "price"
+
+# make sure the prediction does not include NA
+anyNA(submission_poly)
+
+# Create csv file to upload
+# View(submission_poly)
+write.csv(submission_poly, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_poly.csv", row.names=FALSE)
+
+```
+
+### 3.4.2. regression splines
+Since regression spline is a combination of polynomials and step functions, we will skip step functions and directly work with regression spline. The best score on Kaggle is 253.4.
+```{r}
+# Preprocess data (Recipe)
+rec_spline <- recipe( price ~ ., data = train_new3 ) %>%
+  step_bs( latitude, options = list( knots = seq(min(train_new3$latitude), max(train_new3$latitude), length.out = 5) )) %>%
+  step_bs( longitude, options = list( knots = seq(min(train_new3$longitude), max(train_new3$longitude), length.out = 5)  )) %>%
+  step_bs( reviews_per_month, options = list( knots = seq(min(train_new3$reviews_per_month), max(train_new3$reviews_per_month), length.out = 5) )) %>%
+  step_bs( calculated_host_listings_count, options = list( knots = seq(min(train_new3$calculated_host_listings_count), max(train_new3$calculated_host_listings_count), length.out = 5) )) %>%
+  step_bs( availability_365, options = list( knots = seq(min(train_new3$availability_365), max(train_new3$availability_365), length.out = 5) ))
+
+# Specify model
+lm_spec <- linear_reg() %>%     # linear regression
+  set_mode( "regression" ) %>%  # regression (or classification)
+  set_engine( "lm" )            # method of estimation
+
+# Create workflow
+# Create workflow
+spline_wf <- workflow() %>%
+  add_model( lm_spec ) %>%
+  add_recipe( rec_spline )
+
+# Fit model
+spline_fit <- fit( spline_wf, data = train_new3 )
+
+# Make predictions
+predictions_spline <- spline_fit %>%
+  predict(new_data = test_new3)
+submission_spline <- cbind(
+  test_new3 %>%
+    select(ID),
+  exp(predictions_spline)
+)
+names(submission_spline)[names(submission_spline) == ".pred"] <- "price"
+
+# make sure the prediction does not include NA
+anyNA(submission_spline)
+
+# Create csv file to upload
+# View(submission_spline)
+write.csv(submission_spline, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_spline.csv", row.names=FALSE)
+
+```
+
+### 3.4.3. Ridge regression
+The best scores is 252.76 on Kaggle.
+```{r}
+library(glmnet)
+# process data by creating recipe
+ridge_recipe <- 
+  recipe(formula = price ~ ., data = train_new3) %>% 
+  # assigns a previously unseen factor level to a new value
+  step_novel(all_nominal_predictors()) %>%     
+  step_dummy(all_nominal_predictors()) %>% 
+  # removes variables that contain only a single value
+  step_zv(all_predictors()) %>%                
+  step_normalize(all_predictors())
+
+# specify model
+ridge_spec <- linear_reg(mixture = 0, penalty = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("glmnet")
+
+# Create workflow
+ridge_wf <- workflow() %>% 
+  add_recipe(ridge_recipe) %>% 
+  add_model(ridge_spec)
+
+# Do cross validation
+train_fold_ridge <- vfold_cv(train_new3, v = 10)
+
+# Define values to be explored
+penalty_grid_ridge <- grid_regular(
+  penalty(range = c(-5,5)), # Note that this *range is log-scaled*.
+  levels = 50) # range: smallest and largest values possible
+
+# Tune model
+tune_res_ridge <- tune_grid(
+  object = ridge_wf,   # Workflow object
+  resamples = train_fold_ridge,  # CV resamples
+  grid = penalty_grid_ridge)     # Possible values we want to explore
+
+# Fit data to model
+best_penalty <- tune_res_ridge %>%
+  select_best(metric = "rmse")
+ridge_final_wf <- ridge_wf %>%
+  finalize_workflow(best_penalty)
+ridge_final_fit <- ridge_final_wf %>%
+  fit(train_new3)
+
+# Make predictions
+predictions_ridge <- ridge_final_fit %>%
+  predict(new_data = test_new3)
+submission_ridge <- cbind(
+  test_new3 %>%
+    select(ID),
+  exp(predictions_ridge)
+)
+names(submission_ridge)[names(submission_ridge) == ".pred"] <- "price"
+
+# make sure the prediction does not include NA
+anyNA(submission_ridge)
+
+# Create csv file to upload
+# View(submission_ridge)
+write.csv(submission_ridge, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_ridge.csv", row.names=FALSE)
+```
+
+### 3.4.4. Lasso regression
+After running the model, the best score on Kaggle is 252.59, which is also better than that of original data set.
+```{r}
+# Preprocess data (Recipe)
+ridge_recipe_lasso <- 
+  recipe(formula = price ~ ., data = train_new3) %>% 
+  # assigns a previously unseen factor level to a new value
+  step_novel(all_nominal_predictors()) %>%     
+  step_dummy(all_nominal_predictors()) %>% 
+  # removes variables that contain only a single value
+  step_zv(all_predictors()) %>%                
+  step_normalize(all_predictors())
+
+# Specify model (setting mixture = 1 for Lasso)
+lasso_spec <- 
+  linear_reg(mixture = 1, penalty = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet")
+
+# Create workflow
+lasso_wf <- workflow() %>% 
+  add_recipe(ridge_recipe_lasso) %>% 
+  add_model(lasso_spec)
+
+# Do cross validation
+train_fold_lasso <- vfold_cv(train_new3, v = 10)
+
+# Define values to be explored
+penalty_grid <- grid_regular(
+  penalty(range = c(-5,5)), # Note that this *range is log-scaled*.
+  levels = 50) # range: smallest and largest values possible
+
+# Tune model
+tune_res <- tune_grid(
+  object = lasso_wf,   # Workflow object
+  resamples = train_fold_lasso,  # CV resamples
+  grid = penalty_grid)     # Possible values we want to explore
+
+# Fit data to model
+best_penalty <- tune_res %>% select_best(metric = "rmse")
+lasso_final_wf <- lasso_wf %>% finalize_workflow(best_penalty)
+lasso_final_fit <- lasso_final_wf %>% fit(train_new3)
+
+# Make predictions
+predictions_lasso <- lasso_final_fit %>%
+  predict(new_data = test_new3)
+submission_lasso <- cbind(
+  test_new3 %>%
+    select(ID),
+  exp(predictions_lasso)
+)
+
+# To see which variables lasso drops because that means the effect is almost equal to 0, and thus we will later remove it from predictors -> which is number_of_reviews
+tidy(lasso_final_fit)
+
+# Change the column name of .pred
+names(submission_lasso)[names(submission_lasso) == ".pred"] <- "price"
+
+# make sure the prediction does not include NA
+anyNA(submission_lasso)
+
+# Create csv file to upload
+# View(submission_lasso)
+write.csv(submission_lasso, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_lasso.csv", row.names=FALSE)
+
+```
+
+Check importance one more time.
+```{r}
+# Lasso: check the importance level of each variables
+lasso_final_fit %>%
+  # Calculate var importance
+  fit(train_new3) %>%
+  extract_fit_parsnip() %>%
+  vip::vi(lambda = best_penalty$penalty) %>%
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) %>%
+  # Plot
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+```
+
+### 3.4.5. Regression tree
+The best score on Kaggle is 278.82.
+```{r}
+# Preprocess data (Recipe)
+reg_tree_recipe <- recipe(formula = price ~ ., data = train_new3) %>% 
+  step_novel(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+# Specify model (setting mixture = 1 for Lasso) 
+reg_tree_spec <- decision_tree() %>%
+  set_engine("rpart") %>% 
+  set_mode("regression")
+
+# Create workflow 
+reg_tree_wf <- workflow() %>%
+  add_model(reg_tree_spec %>% 
+              set_args(cost_complexity = tune())) %>% 
+  add_recipe(reg_tree_recipe)
+
+# Do cross validation
+train_fold_regtree <- vfold_cv(train_new3) 
+
+# Define values to be explored
+param_grid_regtree <- grid_regular(cost_complexity(range = c(-4, -1)), levels = 10 )
+
+# Tune model
+tune_res_regtree <- tune_grid(reg_tree_wf, resamples = train_fold_regtree, grid = param_grid_regtree)
+
+# Fit data to model
+best_complexity <- tune_res_regtree %>%
+  select_best(metric = "rmse") 
+
+best_complexity_lower <- best_complexity %>% mutate(cost_complexity = best_complexity$cost_complexity / 2)
+
+reg_tree_final <- reg_tree_wf %>%
+  finalize_workflow(best_complexity_lower) 
+reg_tree_final_fit <- reg_tree_final %>%
+  fit(data = train_new3)
+
+# Make predictions
+predictions_regtree <- reg_tree_final_fit %>%
+  predict(new_data = test_new3)
+submission_regtree <- cbind(
+  test_new3 %>%
+    select(ID),
+  exp(predictions_regtree)
+)
+names(submission_regtree)[names(submission_regtree) == ".pred"] <- "price"
+
+# make sure the prediction does not include NA
+anyNA(submission_regtree)
+
+# Create csv file to upload
+# View(submission_regtree)
+write.csv(submission_regtree, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_regtree.csv", row.names=FALSE)
+
+```
+
+### 3.4.6. Bagging
+The best score on Kaggle is 260.46.
+```{r}
+# Preprocess data (Recipe)
+bagging_recipe <- 
+  recipe(formula = price ~ ., data = train_new3) %>% 
+  step_novel(all_nominal_predictors()) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors() ) %>%
+  step_normalize(all_predictors())
+
+# Specify model
+bagging_spec <- rand_forest(mtry = .cols()) %>%
+  set_engine("randomForest", importance = TRUE) %>%
+  set_mode("regression")
+
+# Create workflow
+bagging_tree_wf <- workflow() %>%
+  add_model(bagging_spec) %>%
+  add_recipe(bagging_recipe)
+
+# Fit data to model
+bagging_fit <- fit(bagging_tree_wf, data = train_new3)
+
+# Make predictions
+predictions_bag <- bagging_fit %>%
+  predict(new_data = test_new3)
+submission_bag <- cbind(
+  test_new3 %>%
+    select(ID),
+  exp(predictions_bag)
+)
+names(submission_bag)[names(submission_bag) == ".pred"] <- "price"
+
+# make sure the prediction does not include NA
+anyNA(submission_bag)
+
+# Create csv file to upload
+# View(submission_bag)
+write.csv(submission_bag, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_bag.csv", row.names=FALSE)
+
+```
+
+Check importance again and see that most of the importance level are acceptable. Therefore, we decide not to leave out these predictors any more.
+```{r, fig.height=4}
+bagging_fit %>%
+  fit(data = train_new3) %>%
+  extract_fit_parsnip() %>%
+  vip(geom = "col")
+```
+
+### 3.4.7. Random forest
+The best score on Kaggle is 249.13.
+```{r}
+# Preprocess data (Recipe)
+rf_recipe <- 
+  recipe(formula = price ~ ., data = train_new3) %>% 
+  step_novel(all_nominal_predictors()) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors())
+
+# Specify model
+# Tune specifications
+rf_tune_spec <- rand_forest(
+  mtry = tune(),
+  trees = 500,
+  min_n = tune()
+) %>%
+  set_mode("regression") %>%
+  set_engine("randomForest")
+
+# Create workflow
+rf_tune_wf <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_tune_spec)
+
+# Do cross validation
+train_fold_rf <- vfold_cv(train_new3)
+
+# Tune
+doParallel::registerDoParallel()
+tune_res_rf <- tune_grid(
+  rf_tune_wf,
+  resamples = train_fold_rf,
+  grid = 20
+)
+
+# Check best values
+tune_res_rf %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "RMSE")
+
+# Create a more specific grid
+rf_grid <- grid_regular(
+  mtry( range = c(2, 8)),
+  min_n( range = c (2, 10)),
+  levels = 8
+)
+
+# Tune again
+rf_regular_res <- tune_grid(
+  rf_tune_wf,
+  resamples = train_fold_rf,
+  grid = rf_grid
+)
+
+autoplot(rf_regular_res, metric = "rmse")
+
+# Select best RMSE value
+best_rmse <- select_best(rf_regular_res, metric = "rmse")
+
+# Finalize the workflow with best value
+rf_final <- finalize_workflow(rf_tune_wf, best_rmse)
+
+# Fit final model
+rf_final_fit <- fit(rf_final, data = train_new3)
+
+# Make predictions
+predictions_rf_tune <- rf_final_fit %>%
+  predict(new_data = test_new3)
+submission_rf_tune <- cbind(
+  test_new3 %>%
+    select(ID),
+  exp(predictions_rf_tune)
+)
+names(submission_rf_tune)[names(submission_rf_tune) == ".pred"] <- "price"
+
+# make sure the prediction does not include NA
+anyNA(submission_rf_tune)
+
+# Create csv file to upload
+# View(submission_rf_tune)
+write.csv(submission_rf_tune, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_rf_tune.csv", row.names=FALSE)
+
+```
+
+### 3.4.8. Boosting
+The best score on Kaggle is 253.41.
+```{r}
+# boosting
+# Preprocess data (Recipe)
+xgb_recipe <- 
+  recipe(formula = price ~ ., data = train_new3) %>% 
+  step_novel(all_nominal_predictors()) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors())
+
+# Specify model
+xgb_spec <- boost_tree(
+  trees = 500, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+# Create workflow
+xgb_wf <- workflow() %>%
+  add_recipe(xgb_recipe) %>%
+  add_model(xgb_spec)
+
+# Do cross validation
+train_fold_boo <- vfold_cv(train_new3)
+
+# Define values to be explored
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), train_new3),
+  learn_rate(),
+  size = 30)
+
+# Tune model
+doParallel::registerDoParallel()
+xgb_res <- tune_grid(
+  xgb_wf,
+  resamples = train_fold_boo,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE))
+
+# Select best RMSE value
+best_rmse <- select_best(xgb_res, "rmse")
+
+# Finalize the workflow with best value
+xgb_final <- finalize_workflow(
+  xgb_wf,
+  best_rmse)
+
+# Fit final model
+xgb_final_fit <- fit(xgb_final, data = train_new3)
+
+# Make predictions
+predictions_boo <- xgb_final_fit %>%
+  predict(new_data = test_new3)
+submission_boo <- cbind(
+  test_new3 %>%
+    select(ID),
+  exp(predictions_boo)
+)
+names(submission_boo)[names(submission_boo) == ".pred"] <- "price"
+
+# make sure the prediction does not include NA
+anyNA(submission_boo)
+
+# Create csv file to upload
+# View(submission_boo)
+write.csv(submission_boo, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_boo.csv", row.names=FALSE)
+```
+
+## 3.5. Combination of models by ensemble learning
+In this section, we combine different models and search for the best combination that yields the best score. To do this, we use the so called ensemble averaging, where the predictions of the previous models are used and a weighted average is calculated. Through that, the various errors of the models "average out", so that an ensemble of models performs often better than any individual model.
+
+### 3.5.1. Combining lasso, ridge, regression tree and random forest
+We give random forest even more weight because the last try with tripple weight for random forest has a better score than before) (best score: 246.81)
+```{r}
+submission_avg_ridge_lasso_regtree_4rf <- (submission_lasso + submission_ridge + submission_regtree + 4*submission_rf_tune) / 7
+# We give random forest extra weight
+
+names(submission_avg_ridge_lasso_regtree_4rf)[names(submission_avg_ridge_lasso_regtree_4rf) == ".pred"] <- "price"
+# View(submission_avg_ridge_lasso_regtree_4rf)
+write.csv(submission_avg_ridge_lasso_regtree_4rf, "/Users/hsiehminghsi/Documents/assignment1/regression-challenge-mlai-2023/submission/submission_avg_ridge_lasso_regtree_4rf.csv", row.names=FALSE)
+
+# Checking outliers
+plot(submission_avg_ridge_lasso_regtree_4rf$price) # Here no significant outlier
+```
+
+# 4. Results
+
+## 4.1. Compare all RMSE to see which one might be the best option for our dataset (in-sample)
+The XX model has lowest RMSE, and thus we use this model for further predictions through different combinations of predictors
+```{r}
+# RMSE in sample (training data)
+# Ridge model + tuning
+RMSE_ridge_train <- augment(ridge_final_fit, new_data = train_new3) %>%
+  yardstick::rmse(truth = price, estimate = .pred)
+# Lasso model + tuning
+RMSE_lasso_train <- augment(lasso_final_fit, new_data = train_new3) %>%
+  yardstick::rmse(truth = price, estimate = .pred)
+# Regression tree model + tuning
+RMSE_tree_train <- augment(reg_tree_final_fit, new_data = train_new3) %>%
+  yardstick::rmse(truth = price, estimate = .pred)
+# Bagging model + tuning
+RMSE_bag_train <- augment(bagging_fit, new_data = train_new3) %>%
+  yardstick::rmse(truth = price, estimate = .pred)
+# Random forest  + tuning
+RMSE_rf_train <- augment(rf_final_fit, new_data = train_new3) %>%
+  yardstick::rmse(truth = price, estimate = .pred)
+# Boosting + tuning
+RMSE_xgb_train <- augment(xgb_final_fit, new_data = train_new3) %>%
+  yardstick::rmse(truth = price, estimate = .pred)
+
+# Print out all estimated RMSE from all models
+RMSE_ridge_train$.estimate
+RMSE_lasso_train$.estimate
+RMSE_tree_train$.estimate
+RMSE_bag_train$.estimate
+RMSE_rf_train$.estimate
+RMSE_xgb_train$.estimate
+```
+## 4.2. Compare all RMSE to see the results on Kaggle for our test dataset (out-of-sample)
+```{r}
+# polynomial
+253.16
+#spline
+254.4
+# ridge
+252.76
+# lasso
+252.59
+# regression tree
+278.82
+# bagging
+260.46
+# random forest
+249.13
+# xgboosting
+253.41
+# Combination of lasso, ridge, regression tree and random forest
+246.81
+```
+
+## 4.3. Conclusion of model selection
+We run many methods and the end result on Kaggle shows that if we do ensemble learning in machine learning, in general we can obtain the best result. However, in the blending part, we decide to increase the weight of random forest because it has better RMSE result in all other results by other regression models. Therefore, we conclude that our method of choice is random forest model as main choice, which will then combined with other models. The best combination we found is using lasso, ridge, regression tree and random forest, where we use weighted average method with random forest with weight of 4 and others with 1.
+
+Random forest has some advantages. For example, using this model can reduce the chance of overfitting and the impact of individual tree's biases. Moreover, it can capture the non-linear relationships between prediction and other variables. With these advantages, we decide to make it the most important model we use in this challenge.
+
+Note: The results here are obtained after we submit the result to Kaggle and because we later on run all of them again, we obtain different results.
+
+# 5. Discussion
+In this challenge, we, first of all, clean and prepare the data, and then do an exploratory data analysis to have an overview of the data set. Additionally, we create and select certain variables that are more relevant to us to run the models. To conclude our findings, the model we chose is XX because it generates lower RMSE compared to other models in the train data set, and the results we obtain in Kaggle also shows that this model generates better result in test data set. With the model we build, Airbnb can better understand the driving forces of the price, and make further strategy to optimize the platform.
